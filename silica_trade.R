@@ -280,7 +280,7 @@ inter_trade_data <- pull_trade(
   direction = c("export", "import"),
   commod_code = c("250510", "250590", "7003", "7004", "7005", "7007", "7010", "7019"),
   freq = "A",
-  start = "2015",
+  start = "2011",
   end = "2025"
 ) %>% 
   bind_rows() 
@@ -293,7 +293,7 @@ inter_trade_data_billateral <- pull_trade(
   direction = c("export", "import"),
   commod_code = c("250510", "250590", "7003", "7004", "7005", "7007", "7010", "7019"),
   freq = "A",
-  start = "2024",
+  start = "2021",
   end = "2025"
 ) %>% 
   bind_rows() 
