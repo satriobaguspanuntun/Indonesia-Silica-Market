@@ -105,6 +105,176 @@ p3 <- market_balance %>%
   ggplot(aes(year, values, colour = var)) +
   geom_col()
 
+
+library(dplyr)
+
+# 1. Input your exact historical dataset snapshot
+historical_data <- tibble::tribble(
+  ~year, ~prod_kt, ~import_kt, ~export_kt, ~apparent_domestic_consumption,
+  2011,  1832,     35.7,       0.013,      1868,
+  2012,  1948,     43.1,       0.185,      1991,
+  2013,  2926,     35.6,       0,          2961,
+  2014,  3915,     43.6,       0,          3958,
+  2015,  1974,     17.2,       0,          1991,
+  2016,  2789,     30.9,       0,          2820,
+  2017,  3605,     35.0,       0,          3640,
+  2018,  2566,     14.4,       0.012,      2581,
+  2019,  3501,     24.6,       0,          3525,
+  2020,  3001,     11.4,       0,          3012,
+  2021,  3224,     10.6,       208,        3026,
+  2022,  4916,     6.90,       800,        4122,
+  2023,  5131,     10.4,       2387,       2754,
+  2024,  5562,     15.3,       2587,       2990,
+  2025,  7868,     17.2,       3660,       4225
+)
+
+# 2. Calculate the historical baseline average from the stable zero-export era (2013-2020)
+# This represents what the domestic market naturally consumes (~3,061 kt/year)
+stable_era_demand <- historical_data %>%
+  filter(year >= 2013 & year <= 2020) %>%
+  summarise(avg_demand = mean(apparent_domestic_consumption)) %>%
+  pull(avg_demand)
+
+# 3. Quantify the real Surplus or Deficit
+market_balance_quantified <- historical_data %>%
+  mutate(
+    # Assume domestic industrial needs grow at a standard conservative 4% from the stable era baseline
+    true_estimated_industrial_need = stable_era_demand * (1.04)^(year - 2020),
+    
+    # Override for historical zero-export years where apparent consumption WAS the true need
+    true_estimated_industrial_need = if_else(year <= 2020, apparent_domestic_consumption, true_estimated_industrial_need),
+    
+    # Structural Balance = What was left in the country MINUS what factories actually needed
+    net_structural_balance_kt = round(apparent_domestic_consumption - true_estimated_industrial_need, 2),
+    
+    market_condition = case_when(
+      net_structural_balance_kt > 100  ~ "SURPLUS: Supply building up in inventories",
+      net_structural_balance_kt < -100 ~ "DEFICIT: Domestic factories starved by exports",
+      TRUE                             ~ "BALANCED: Equilibrium"
+    )
+  )
+
+
+library(dplyr)
+
+structural_squeeze <- market_balance %>%
+  arrange(year) %>%
+  mutate(
+    # 1. Isolate what is physically left behind for Indonesia each year
+    domestic_available_supply_kt = prod_kt + import_kt - export_kt,
+    
+    # 2. Calculate the Year-over-Year (YoY) growth rate of that domestic supply
+    domestic_supply_growth_pct = (domestic_available_supply_kt - lag(domestic_available_supply_kt)) / lag(domestic_available_supply_kt) * 100,
+    
+    # 3. Quantify the market stress condition
+    market_balance_signal = case_when(
+      year <= 2020 ~ "STABLE: Zero-Export Insulation Era",
+      domestic_supply_growth_pct < -5  ~ "DEFICIT SQUEEZE: Exports cannibalizing domestic supply",
+      domestic_supply_growth_pct > 10  ~ "SURPLUS GLUT: Supply piling up faster than industrial growth",
+      TRUE                              ~ "BALANCED: Supply tracking steady"
+    )
+  )
+
+
+library(dplyr)
+
+# 1. Define the planning horizon
+forecast_years <- 2022:2031
+
+# 2. Build the unified bottom-up industrial demand matrix
+domestic_demand_matrix <- tibble(year = forecast_years) %>%
+  mutate(
+    # --- CEMENT SECTOR FOOTPRINT (From Ministry of Industry Data) ---
+    # Actuals from chart for 2022-2024; 3.5% organic growth thereafter
+    cement_production_mio_tons = case_when(
+      year == 2022 ~ 64.5,
+      year == 2023 ~ 66.9,
+      year == 2024 ~ 67.8,
+      TRUE         ~ 67.8 * (1.035)^(year - 2024)
+    ),
+    # Derive Sand Demand using our empirical coefficients (converted to kt)
+    sand_cement_core_kt     = cement_production_mio_tons * 0.025417 * 1000,
+    sand_cement_products_kt = cement_production_mio_tons * 0.008632 * 1000,
+    total_cement_sand_kt    = sand_cement_core_kt + sand_cement_products_kt,
+    
+    # --- GLASS SECTOR FOOTPRINT (From ESDM Table 13.1) ---
+    # 2022 Base Capacity = 2,158 kt. 
+    # We factor in a conservative 4.0% CAGR for standard domestic glass expansion, 
+    # PLUS a massive structural step-change in 2027 (+1,200 kt capacity) 
+    # representing the landmark Xinyi Glass downstream mega-project in Batam/Rempang.
+    glass_capacity_kt = case_when(
+      year <= 2026 ~ 2158 * (1.04)^(year - 2022),
+      year >= 2027 ~ (2158 * (1.04)^(year - 2022)) + 1200 # Downstreaming policy shock
+    ),
+    # Apply the capacity-normalized coefficient derived from the ESDM sheet
+    total_glass_sand_kt = glass_capacity_kt * 0.372449,
+    
+    # --- OTHER INDUSTRIAL ALPHA SECTORS (From Table 13.1 rows 3, 4, 6, 7) ---
+    # Combined 2022 baseline for Ceramics, Smelters, and Processing = 1,530.6 kt
+    # Growing at a steady macro baseline of 3.0% YoY
+    other_sectors_sand_kt = 1530.67 * (1.03)^(year - 2022),
+    
+    # --- FINAL BOTTOM-UP AGGREGATION ---
+    clean_domestic_demand_kt = round(total_cement_sand_kt + total_glass_sand_kt + other_sectors_sand_kt, 2)
+  )
+
+# 3. View the final scannable demand vector for your report
+final_demand_summary <- domestic_demand_matrix %>%
+  select(year, cement_production_mio_tons, total_cement_sand_kt, glass_capacity_kt, total_glass_sand_kt, clean_domestic_demand_kt)
+
+print(final_demand_summary)
+
+
+library(dplyr)
+
+# 1. Configure timeline and export contract roll-off rate
+timeline <- 2022:2031
+export_attrition_rate <- 0.133 # 13.3% annual decay based on contract lifecycle
+
+export_attrition_outlook <- tibble(year = timeline) %>%
+  mutate(
+    # --- PRODUCTION (Grows organically at 3.5% baseline post-2025) ---
+    prod_kt = case_when(
+      year == 2022 ~ 4916.00,
+      year == 2023 ~ 5131.00,
+      year == 2024 ~ 5562.00,
+      year == 2025 ~ 7868.00,
+      TRUE         ~ 7868.00 * (1.035)^(year - 2025)
+    ),
+    
+    # --- EXPORTS (Phased decline as 5-10 year licenses expire) ---
+    export_kt = case_when(
+      year <= 2026 ~ case_when(
+        year == 2022 ~ 800.00,
+        year == 2023 ~ 2387.00,
+        year == 2024 ~ 2587.00,
+        TRUE         ~ 3660.00
+      ),
+      TRUE         ~ 3660.00 * (1 - export_attrition_rate)^(year - 2026)
+    ),
+    
+    # --- IMPORTS ---
+    import_kt = case_when(
+      year == 2022 ~ 6.90,
+      year == 2023 ~ 10.40,
+      year == 2024 ~ 15.30,
+      year == 2025 ~ 17.20,
+      TRUE         ~ 17.20
+    ),
+    
+    # --- TRUE INDUSTRIAL DEMAND (Bottom-up base growing at 4.5% organically) ---
+    true_industrial_demand_kt = 4523.837 * (1.045)^(year - 2022)
+  ) %>%
+  
+  # --- REALIZED MARKET BALANCE ---
+  mutate(
+    apparent_domestic_consumption_kt = prod_kt + import_kt - export_kt,
+    structural_balance_kt = round(apparent_domestic_consumption_kt - true_industrial_demand_kt, 2)
+  )
+
+# View clean, rounded summary matrix
+print(export_attrition_outlook %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
+
 # Reserve and Mine location expansion
 
 
