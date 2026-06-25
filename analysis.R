@@ -105,180 +105,296 @@ p3 <- market_balance %>%
   ggplot(aes(year, values, colour = var)) +
   geom_col()
 
-
 library(dplyr)
+library(tidyr)
 
-# 1. Input your exact historical dataset snapshot
-historical_data <- tibble::tribble(
-  ~year, ~prod_kt, ~import_kt, ~export_kt, ~apparent_domestic_consumption,
-  2011,  1832,     35.7,       0.013,      1868,
-  2012,  1948,     43.1,       0.185,      1991,
-  2013,  2926,     35.6,       0,          2961,
-  2014,  3915,     43.6,       0,          3958,
-  2015,  1974,     17.2,       0,          1991,
-  2016,  2789,     30.9,       0,          2820,
-  2017,  3605,     35.0,       0,          3640,
-  2018,  2566,     14.4,       0.012,      2581,
-  2019,  3501,     24.6,       0,          3525,
-  2020,  3001,     11.4,       0,          3012,
-  2021,  3224,     10.6,       208,        3026,
-  2022,  4916,     6.90,       800,        4122,
-  2023,  5131,     10.4,       2387,       2754,
-  2024,  5562,     15.3,       2587,       2990,
-  2025,  7868,     17.2,       3660,       4225
+# ==============================================================================
+# 1. PARAMETERS & FORECAST CONFIGURATION
+# ==============================================================================
+cfg <- list(
+  # Macro & Growth Parameters
+  bps_growth_b4_2025       = 0.0479,     # 4.79% Growth from BPS Category B.4
+  mining_organic_growth    = 0.025,      # 2.5% steady-state growth post-2025
+  other_growth_pre_2026    = 0.015,      # Conservative 1.5% growth for other industries
+  export_attrition_rate    = 0.133,      # 13.3% structural decay post-2025
+  cement_forecast_cap      = 67.8,       # Post-2024 operational capacity ceiling (MT)
+  
+  # Downstream Industry Intensity Ratios (Audited to Ministry Data)
+  cement_silica_ratio      = 0.0254172,  # Single factor: Row 2 Sand / 2022 Cement Prod
+  glass_intensity_factor    = 0.372449,  # Row 1 Sand Demand / Total Glass Capacity
+  
+  # Audited Table 13.1 Baselines (Kilotons)
+  esdm_other_demand_2022   = 1523.93,    # Sum of Rows 3, 4, 6, and 7
+  esdm_glass_base_capacity = 2158.0      # Sum of Glass Industry Capacities
 )
 
-# 2. Calculate the historical baseline average from the stable zero-export era (2013-2020)
-# This represents what the domestic market naturally consumes (~3,061 kt/year)
-stable_era_demand <- historical_data %>%
-  filter(year >= 2013 & year <= 2020) %>%
-  summarise(avg_demand = mean(apparent_domestic_consumption)) %>%
-  pull(avg_demand)
+# Downstream glass industrial expansions registry
+glass_projects <- tibble(
+  year_commissioned = c(2024, 2026, 2028),
+  capacity_add_kt   = c(838.0, 720.0, 400.0)
+)
 
-# 3. Quantify the real Surplus or Deficit
-market_balance_quantified <- historical_data %>%
+# Kemenperin Official Cement Production
+cement_kemenperin_base <- tibble(
+  year           = c(2022, 2023, 2024),
+  cement_prod_mt = c(64.5, 66.9, 67.8)
+)
+
+# ==============================================================================
+# 2. PRE-PIPELINE STATIC SCALAR ANCHOR EXTRACTION
+# ==============================================================================
+prod_2024_anchor   <- max(silica_prod_bps$prod_kt[silica_prod_bps$year == 2024], na.rm = TRUE)
+prod_2025_imputed  <- prod_2024_anchor * (1 + cfg$bps_growth_b4_2025)
+
+export_2025_anchor <- 3660.0   
+import_2025_anchor <- 17.2     
+
+# ==============================================================================
+# 3. MAIN FORECASTING PIPELINE (FILTERED TO 2022 ONWARDS)
+# ==============================================================================
+market_balance <- silica_prod_bps %>% 
+  filter(year >= 2022) %>% 
+  mutate(reporter_iso = "IDN", cmd_code = "250510") %>% 
+  
+  # A. Ingestion and trade balance standardization
+  full_join(inter_trade_data %>%
+              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
+              filter(cmd_code == "250510", flow_desc == "Export", reporter_iso == "IDN"), 
+            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
+  rename("export" = primary_value, "net_wgt_exp" = net_wgt) %>% 
+  select(-flow_desc) %>% 
+  
+  left_join(inter_trade_data %>%
+              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
+              filter(cmd_code == "250510", flow_desc == "Import", reporter_iso == "IDN"), 
+            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
+  rename("import" = primary_value, "net_wgt_imp" = net_wgt) %>% 
+  select(-flow_desc) %>% 
+  
+  mutate(across(c(production, prod_kt, export, net_wgt_exp, import, net_wgt_imp), ~ as.numeric(replace_na(., 0)))) %>% 
   mutate(
-    # Assume domestic industrial needs grow at a standard conservative 4% from the stable era baseline
-    true_estimated_industrial_need = stable_era_demand * (1.04)^(year - 2020),
-    
-    # Override for historical zero-export years where apparent consumption WAS the true need
-    true_estimated_industrial_need = if_else(year <= 2020, apparent_domestic_consumption, true_estimated_industrial_need),
-    
-    # Structural Balance = What was left in the country MINUS what factories actually needed
-    net_structural_balance_kt = round(apparent_domestic_consumption - true_estimated_industrial_need, 2),
-    
-    market_condition = case_when(
-      net_structural_balance_kt > 100  ~ "SURPLUS: Supply building up in inventories",
-      net_structural_balance_kt < -100 ~ "DEFICIT: Domestic factories starved by exports",
-      TRUE                             ~ "BALANCED: Equilibrium"
-    )
-  )
-
-
-library(dplyr)
-
-structural_squeeze <- market_balance %>%
+    export_kt = round(net_wgt_exp / 1e6, 3),
+    import_kt = round(net_wgt_imp / 1e6, 3)
+  ) %>%
+  select(-net_wgt_exp, -net_wgt_imp) %>%
+  
+  # B. Continuous Forecasting Horizon Extension (Locked to 2022-2031)
+  complete(year = 2022:2031, fill = list(reporter_iso = "IDN", cmd_code = "250510")) %>%
+  mutate(type = if_else(year <= 2025, "Historical", "Forecast")) %>%
   arrange(year) %>%
+  
+  # C. Clean Supply Framework 
   mutate(
-    # 1. Isolate what is physically left behind for Indonesia each year
-    domestic_available_supply_kt = prod_kt + import_kt - export_kt,
-    
-    # 2. Calculate the Year-over-Year (YoY) growth rate of that domestic supply
-    domestic_supply_growth_pct = (domestic_available_supply_kt - lag(domestic_available_supply_kt)) / lag(domestic_available_supply_kt) * 100,
-    
-    # 3. Quantify the market stress condition
-    market_balance_signal = case_when(
-      year <= 2020 ~ "STABLE: Zero-Export Insulation Era",
-      domestic_supply_growth_pct < -5  ~ "DEFICIT SQUEEZE: Exports cannibalizing domestic supply",
-      domestic_supply_growth_pct > 10  ~ "SURPLUS GLUT: Supply piling up faster than industrial growth",
-      TRUE                              ~ "BALANCED: Supply tracking steady"
-    )
-  )
-
-
-library(dplyr)
-
-# 1. Define the planning horizon
-forecast_years <- 2022:2031
-
-# 2. Build the unified bottom-up industrial demand matrix
-domestic_demand_matrix <- tibble(year = forecast_years) %>%
-  mutate(
-    # --- CEMENT SECTOR FOOTPRINT (From Ministry of Industry Data) ---
-    # Actuals from chart for 2022-2024; 3.5% organic growth thereafter
-    cement_production_mio_tons = case_when(
-      year == 2022 ~ 64.5,
-      year == 2023 ~ 66.9,
-      year == 2024 ~ 67.8,
-      TRUE         ~ 67.8 * (1.035)^(year - 2024)
-    ),
-    # Derive Sand Demand using our empirical coefficients (converted to kt)
-    sand_cement_core_kt     = cement_production_mio_tons * 0.025417 * 1000,
-    sand_cement_products_kt = cement_production_mio_tons * 0.008632 * 1000,
-    total_cement_sand_kt    = sand_cement_core_kt + sand_cement_products_kt,
-    
-    # --- GLASS SECTOR FOOTPRINT (From ESDM Table 13.1) ---
-    # 2022 Base Capacity = 2,158 kt. 
-    # We factor in a conservative 4.0% CAGR for standard domestic glass expansion, 
-    # PLUS a massive structural step-change in 2027 (+1,200 kt capacity) 
-    # representing the landmark Xinyi Glass downstream mega-project in Batam/Rempang.
-    glass_capacity_kt = case_when(
-      year <= 2026 ~ 2158 * (1.04)^(year - 2022),
-      year >= 2027 ~ (2158 * (1.04)^(year - 2022)) + 1200 # Downstreaming policy shock
-    ),
-    # Apply the capacity-normalized coefficient derived from the ESDM sheet
-    total_glass_sand_kt = glass_capacity_kt * 0.372449,
-    
-    # --- OTHER INDUSTRIAL ALPHA SECTORS (From Table 13.1 rows 3, 4, 6, 7) ---
-    # Combined 2022 baseline for Ceramics, Smelters, and Processing = 1,530.6 kt
-    # Growing at a steady macro baseline of 3.0% YoY
-    other_sectors_sand_kt = 1530.67 * (1.03)^(year - 2022),
-    
-    # --- FINAL BOTTOM-UP AGGREGATION ---
-    clean_domestic_demand_kt = round(total_cement_sand_kt + total_glass_sand_kt + other_sectors_sand_kt, 2)
-  )
-
-# 3. View the final scannable demand vector for your report
-final_demand_summary <- domestic_demand_matrix %>%
-  select(year, cement_production_mio_tons, total_cement_sand_kt, glass_capacity_kt, total_glass_sand_kt, clean_domestic_demand_kt)
-
-print(final_demand_summary)
-
-
-library(dplyr)
-
-# 1. Configure timeline and export contract roll-off rate
-timeline <- 2022:2031
-export_attrition_rate <- 0.133 # 13.3% annual decay based on contract lifecycle
-
-export_attrition_outlook <- tibble(year = timeline) %>%
-  mutate(
-    # --- PRODUCTION (Grows organically at 3.5% baseline post-2025) ---
     prod_kt = case_when(
-      year == 2022 ~ 4916.00,
-      year == 2023 ~ 5131.00,
-      year == 2024 ~ 5562.00,
-      year == 2025 ~ 7868.00,
-      TRUE         ~ 7868.00 * (1.035)^(year - 2025)
+      year <= 2024 ~ prod_kt,
+      year == 2025 ~ prod_2025_imputed,
+      year > 2025  ~ prod_2025_imputed * (1 + cfg$mining_organic_growth)^(year - 2025)
     ),
-    
-    # --- EXPORTS (Phased decline as 5-10 year licenses expire) ---
-    export_kt = case_when(
-      year <= 2026 ~ case_when(
-        year == 2022 ~ 800.00,
-        year == 2023 ~ 2387.00,
-        year == 2024 ~ 2587.00,
-        TRUE         ~ 3660.00
-      ),
-      TRUE         ~ 3660.00 * (1 - export_attrition_rate)^(year - 2026)
-    ),
-    
-    # --- IMPORTS ---
     import_kt = case_when(
-      year == 2022 ~ 6.90,
-      year == 2023 ~ 10.40,
-      year == 2024 ~ 15.30,
-      year == 2025 ~ 17.20,
-      TRUE         ~ 17.20
+      year > 2025  ~ import_2025_anchor,
+      TRUE         ~ import_kt
     ),
-    
-    # --- TRUE INDUSTRIAL DEMAND (Bottom-up base growing at 4.5% organically) ---
-    true_industrial_demand_kt = 4523.837 * (1.045)^(year - 2022)
+    export_kt = case_when(
+      year > 2025  ~ export_2025_anchor * (1 - cfg$export_attrition_rate)^(year - 2025),
+      TRUE         ~ export_kt
+    ),
+    apparent_domestic_supply_kt = prod_kt + import_kt - export_kt
   ) %>%
   
-  # --- REALIZED MARKET BALANCE ---
+  # D. Relational Cement Demand Mapping
+  left_join(cement_kemenperin_base, by = "year") %>% 
   mutate(
-    apparent_domestic_consumption_kt = prod_kt + import_kt - export_kt,
-    structural_balance_kt = round(apparent_domestic_consumption_kt - true_industrial_demand_kt, 2)
-  )
+    cement_mt = case_when(
+      !is.na(cement_prod_mt) ~ cement_prod_mt, 
+      TRUE                   ~ cfg$cement_forecast_cap 
+    ),
+    demand_cement_kt = cement_mt * cfg$cement_silica_ratio * 1000
+  ) %>% 
+  select(-cement_prod_mt) %>% 
+  
+  # E. Other Industries Matrix
+  mutate(
+    demand_other_kt = if_else(
+      year <= 2026, 
+      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(year - 2022),
+      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(2026 - 2022) * (1 + cfg$mining_organic_growth)^(year - 2026)
+    )
+  ) %>%
+  
+  # F. Relational Glass Capacity Mapping (Fixed 2023 logic defect)
+  left_join(glass_projects %>% 
+              mutate(cum_additions = cumsum(capacity_add_kt)) %>% 
+              select(year_commissioned, cum_additions), 
+            by = join_by(year == year_commissioned)) %>% 
+  fill(cum_additions, .direction = "down") %>% 
+  mutate(cum_additions = replace_na(cum_additions, 0)) %>% 
+  
+  mutate(
+    base_capacity = if_else(year <= 2026, cfg$esdm_glass_base_capacity, cfg$esdm_glass_base_capacity * (1.02)^(year - 2026)),
+    total_capacity = base_capacity + cum_additions,
+    util_rate = case_when(
+      year <= 2023 ~ 1.00,  
+      year == 2024 ~ 0.75,  
+      year == 2025 ~ 0.79, 
+      year == 2026 ~ 0.82, 
+      TRUE         ~ 0.85
+    ),
+    demand_glass_kt = total_capacity * util_rate * cfg$glass_intensity_factor
+  ) %>% 
+  select(-cum_additions, -base_capacity, -total_capacity, -util_rate) %>%
+  
+  # G. Structural Balance and Market Status Outputs
+  mutate(
+    total_industrial_demand_kt = demand_cement_kt + demand_glass_kt + demand_other_kt,
+    structural_balance_kt = apparent_domestic_supply_kt - total_industrial_demand_kt,
+    market_status = case_when(
+      structural_balance_kt > 250  ~ "Market Glut / Inventory Build",
+      structural_balance_kt < -250 ~ "Supply Deficit (Alert)",
+      TRUE                         ~ "Balanced / Tight Market"
+    ),
+    export_share_pct = (export_kt / prod_kt) * 100
+  ) %>%
+  
+  # H. Final Safeguard Filter
+  filter(year >= 2022)
 
-# View clean, rounded summary matrix
-print(export_attrition_outlook %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 
+p4 <- market_balance %>% 
+  relocate(year, type, reporter_iso, cmd_code, market_status) %>% 
+  pivot_longer(cols = production:export_share_pct,
+               names_to = "var",
+               values_to = "values") %>% 
+  filter(var %in% c("structural_balance_kt")) %>% 
+  ggplot(aes(year, values, fill = var)) +
+  geom_bar(stat = "identity")
+
+
+library(dplyr)
+library(tidyr)
+
+# ==============================================================================
+# 1. PARAMETERS & FORECAST CONFIGURATION
+# ==============================================================================
+cfg <- list(
+  # Macro & Growth Parameters
+  proxy_growth_2024        = 0.0348,     # 3.48% BPS Mining Sector Projection for 2024
+  mining_organic_growth    = 0.080,      # 2.5% steady-state growth post-2025
+  other_growth_pre_2026    = 0.015,      # Conservative 1.5% growth for other industries
+  export_attrition_rate    = 0.15,      # 13.3% structural decay post-2025
+  cement_forecast_cap      = 67.8,       # MT capacity ceiling
+  
+  # Downstream Industry Intensity Ratios (Audited)
+  cement_silica_ratio      = 0.0254172,  
+  glass_intensity_factor    = 0.372449,  
+  
+  # Audited Baselines (Kilotons)
+  esdm_other_demand_2022   = 1523.93,    
+  esdm_glass_base_capacity = 2158.0      
+)
+
+# Downstream glass industrial expansions registry
+glass_projects <- tibble(
+  year_commissioned = c(2024, 2026, 2028),
+  capacity_add_kt   = c(838.0, 720.0, 400.0)
+)
+
+# Kemenperin Official Cement Production
+cement_kemenperin_base <- tibble(
+  year           = c(2022, 2023, 2024),
+  cement_prod_mt = c(64.5, 66.9, 67.8)
+)
+
+# ==============================================================================
+# 2. MAIN FORECASTING PIPELINE
+# ==============================================================================
+market_balance <- silica_prod_bps %>% 
+  filter(year >= 2022) %>% 
+  mutate(reporter_iso = "IDN", cmd_code = "250510") %>% 
+  
+  # A. Ingestion and trade balance
+  full_join(inter_trade_data %>%
+              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
+              filter(cmd_code == "250510", flow_desc == "Export", reporter_iso == "IDN"), 
+            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
+  rename("export" = primary_value, "net_wgt_exp" = net_wgt) %>% 
+  select(-flow_desc) %>% 
+  
+  left_join(inter_trade_data %>%
+              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
+              filter(cmd_code == "250510", flow_desc == "Import", reporter_iso == "IDN"), 
+            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
+  rename("import" = primary_value, "net_wgt_imp" = net_wgt) %>% 
+  select(-flow_desc) %>% 
+  
+  mutate(across(c(production, prod_kt, export, net_wgt_exp, import, net_wgt_imp), ~ as.numeric(replace_na(., 0)))) %>% 
+  mutate(
+    export_kt = round(net_wgt_exp / 1e6, 3),
+    import_kt = round(net_wgt_imp / 1e6, 3)
+  ) %>%
+  select(-net_wgt_exp, -net_wgt_imp) %>%
+  
+  # B. Continuous Forecasting Horizon
+  complete(year = 2022:2031, fill = list(reporter_iso = "IDN", cmd_code = "250510")) %>%
+  mutate(type = if_else(year <= 2025, "Historical", "Forecast")) %>%
+  arrange(year) %>%
+  
+  # C. Clean Supply Framework with 2024 Mining Sector Proxy
+  mutate(
+    prod_kt = case_when(
+      year == 2023 ~ prod_kt,
+      year == 2024 ~ prod_kt[year == 2023] * (1 + cfg$proxy_growth_2024),
+      year == 2025 ~ prod_kt[year == 2023] * (1 + cfg$mining_organic_growth),
+      year > 2025  ~ prod_kt[year == 2023] * (1 + cfg$mining_organic_growth)^(year - 2025),
+      TRUE         ~ prod_kt
+    ),
+    import_kt = case_when(year > 2025 ~ 17.2, TRUE ~ import_kt),
+    export_kt = case_when(year > 2025 ~ 3660.0, TRUE ~ export_kt),
+    apparent_domestic_supply_kt = prod_kt + import_kt - export_kt
+  ) %>%
+  
+  # D. Demand Mapping
+  left_join(cement_kemenperin_base, by = "year") %>% 
+  mutate(
+    cement_mt = case_when(!is.na(cement_prod_mt) ~ cement_prod_mt, TRUE ~ cfg$cement_forecast_cap),
+    demand_cement_kt = cement_mt * cfg$cement_silica_ratio * 1000
+  ) %>% 
+  select(-cement_prod_mt) %>% 
+  
+  mutate(
+    demand_other_kt = if_else(
+      year <= 2026, 
+      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(year - 2022),
+      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(2026 - 2022) * (1 + cfg$mining_organic_growth)^(year - 2026)
+    )
+  ) %>%
+  
+  # E. Glass Mapping (2023 stability fix)
+  left_join(glass_projects %>% 
+              mutate(cum_additions = cumsum(capacity_add_kt)) %>% 
+              select(year_commissioned, cum_additions), 
+            by = join_by(year == year_commissioned)) %>% 
+  fill(cum_additions, .direction = "down") %>% 
+  mutate(cum_additions = replace_na(cum_additions, 0)) %>% 
+  mutate(
+    base_capacity = if_else(year <= 2026, cfg$esdm_glass_base_capacity, cfg$esdm_glass_base_capacity * (1.02)^(year - 2026)),
+    total_capacity = base_capacity + cum_additions,
+    util_rate = case_when(year <= 2023 ~ 1.00, year == 2024 ~ 0.75, year == 2025 ~ 0.79, TRUE ~ 0.85),
+    demand_glass_kt = total_capacity * util_rate * cfg$glass_intensity_factor
+  ) %>% 
+  select(-cum_additions, -base_capacity, -total_capacity, -util_rate) %>%
+  
+  # F. Final Outputs
+  mutate(
+    total_industrial_demand_kt = demand_cement_kt + demand_glass_kt + demand_other_kt,
+    structural_balance_kt = apparent_domestic_supply_kt - total_industrial_demand_kt,
+    market_status = case_when(
+      structural_balance_kt > 250  ~ "Market Glut",
+      structural_balance_kt < -250 ~ "Supply Deficit",
+      TRUE                         ~ "Balanced"
+    )
+  ) %>% 
+  filter(year >= 2022)
 # Reserve and Mine location expansion
-
-
-
 
 # Trade position and direction (value and volume)
 
