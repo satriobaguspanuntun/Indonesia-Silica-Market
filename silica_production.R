@@ -1,6 +1,5 @@
 library(tidyverse)
 library(readr)
-library(pdftools)
 library(openxlsx)
 
 # BPS Data

@@ -275,7 +275,7 @@ trade_data_wrap <- function(country_vector, start, end) {
 }
 
 inter_trade_data <- pull_trade(
-  reporter = c("IDN", "VNM", "MYS", "THA", "AUS", "CHN", "USA"),
+  reporter = c("IDN"),
   partner = "World",
   direction = c("export", "import"),
   commod_code = c("250510", "250590", "7003", "7004", "7005", "7007", "7010", "7019"),
@@ -287,14 +287,14 @@ inter_trade_data <- pull_trade(
 
 country_code <- country_codes %>% filter(is.na(exit_year))
 
-inter_trade_data_billateral <- pull_trade(
+inter_trade_data_month <- pull_trade(
   reporter = c("IDN"),
-  partner = "all_countries",
+  partner = "World",
   direction = c("export", "import"),
   commod_code = c("250510", "250590", "7003", "7004", "7005", "7007", "7010", "7019"),
-  freq = "A",
+  freq = "M",
   start = "2021",
-  end = "2025"
+  end = "2026"
 ) %>% 
   bind_rows() 
 

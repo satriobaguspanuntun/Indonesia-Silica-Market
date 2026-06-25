@@ -1,6 +1,8 @@
 library(tidyverse)
 library(openxlsx)
 
+# Read IMF data
+imf_weo <-read_csv("~/Indonesia-Silica-Market/data/IMF.csv")
 
 # Market Balance (forcasted)
 market_balance <- silica_prod_bps %>% 
@@ -105,9 +107,6 @@ p3 <- market_balance %>%
   ggplot(aes(year, values, colour = var)) +
   geom_col()
 
-library(dplyr)
-library(tidyr)
-
 # ==============================================================================
 # 1. PARAMETERS & FORECAST CONFIGURATION
 # ==============================================================================
@@ -116,7 +115,7 @@ cfg <- list(
   bps_growth_b4_2025       = 0.0479,     # 4.79% Growth from BPS Category B.4
   mining_organic_growth    = 0.025,      # 2.5% steady-state growth post-2025
   other_growth_pre_2026    = 0.015,      # Conservative 1.5% growth for other industries
-  export_attrition_rate    = 0.133,      # 13.3% structural decay post-2025
+  export_attrition_rate    = 0.15,      # 13.3% structural decay post-2025
   cement_forecast_cap      = 67.8,       # Post-2024 operational capacity ceiling (MT)
   
   # Downstream Industry Intensity Ratios (Audited to Ministry Data)
@@ -269,136 +268,237 @@ p4 <- market_balance %>%
   geom_bar(stat = "identity")
 
 
-library(dplyr)
-library(tidyr)
+# ==============================================================================
+# SILICA SAND MARKET BALANCE FORECAST
+# Change from original: Section G only — dual balance measure implementation.
+# Supply pipeline (Sections A–F) is unchanged from original.
+# ==============================================================================
 
 # ==============================================================================
 # 1. PARAMETERS & FORECAST CONFIGURATION
 # ==============================================================================
 cfg <- list(
-  # Macro & Growth Parameters
-  proxy_growth_2024        = 0.0348,     # 3.48% BPS Mining Sector Projection for 2024
-  mining_organic_growth    = 0.080,      # 2.5% steady-state growth post-2025
-  other_growth_pre_2026    = 0.015,      # Conservative 1.5% growth for other industries
-  export_attrition_rate    = 0.15,      # 13.3% structural decay post-2025
-  cement_forecast_cap      = 67.8,       # MT capacity ceiling
-  
-  # Downstream Industry Intensity Ratios (Audited)
-  cement_silica_ratio      = 0.0254172,  
-  glass_intensity_factor    = 0.372449,  
-  
-  # Audited Baselines (Kilotons)
-  esdm_other_demand_2022   = 1523.93,    
-  esdm_glass_base_capacity = 2158.0      
+  mining_organic_growth    = 0.100,
+  cement_forecast_cap      = 67.8,
+  cement_silica_ratio      = 0.0254172,
+  glass_intensity_factor   = 0.372449,
+  esdm_other_demand_2022   = 1523.93,
+  esdm_glass_base_capacity = 2158.0,
+  other_demand_capacity_util = 0.60
 )
 
-# Downstream glass industrial expansions registry
 glass_projects <- tibble(
   year_commissioned = c(2024, 2026, 2028),
   capacity_add_kt   = c(838.0, 720.0, 400.0)
 )
 
-# Kemenperin Official Cement Production
 cement_kemenperin_base <- tibble(
   year           = c(2022, 2023, 2024),
   cement_prod_mt = c(64.5, 66.9, 67.8)
 )
 
+imf_growth_factors <- imf_weo_forecast %>%
+  select(INDICATOR, `2022`:`2031`) %>%
+  pivot_longer(cols = `2022`:`2031`, names_to = "year", values_to = "value") %>%
+  mutate(year = as.numeric(year)) %>%
+  pivot_wider(names_from = INDICATOR, values_from = value) %>%
+  mutate(
+    gdp_macro_multiplier    = gdp_growth_pct / 100,
+    export_macro_multiplier = export_goods_growth_pct / 100,
+    import_macro_multiplier = import_goods_growth_pct / 100
+  ) %>%
+  select(year, gdp_macro_multiplier, export_macro_multiplier, import_macro_multiplier)
+
 # ==============================================================================
-# 2. MAIN FORECASTING PIPELINE
+# 2. MAIN FORECASTING PIPELINE WITH IMF MACRO DRIVERS
 # ==============================================================================
-market_balance <- silica_prod_bps %>% 
-  filter(year >= 2022) %>% 
-  mutate(reporter_iso = "IDN", cmd_code = "250510") %>% 
+market_balance <- silica_prod_bps %>%
+  filter(year >= 2022) %>%
+  mutate(reporter_iso = "IDN", cmd_code = "250510") %>%
   
-  # A. Ingestion and trade balance
+  # A. Ingestion and trade balance standardization
   full_join(inter_trade_data %>%
-              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
-              filter(cmd_code == "250510", flow_desc == "Export", reporter_iso == "IDN"), 
-            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
-  rename("export" = primary_value, "net_wgt_exp" = net_wgt) %>% 
-  select(-flow_desc) %>% 
+              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>%
+              filter(cmd_code == "250510", flow_desc == "Export", reporter_iso == "IDN"),
+            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>%
+  rename("export" = primary_value, "net_wgt_exp" = net_wgt) %>%
+  select(-flow_desc) %>%
   
   left_join(inter_trade_data %>%
-              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
-              filter(cmd_code == "250510", flow_desc == "Import", reporter_iso == "IDN"), 
-            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
-  rename("import" = primary_value, "net_wgt_imp" = net_wgt) %>% 
-  select(-flow_desc) %>% 
+              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>%
+              filter(cmd_code == "250510", flow_desc == "Import", reporter_iso == "IDN"),
+            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>%
+  rename("import" = primary_value, "net_wgt_imp" = net_wgt) %>%
+  select(-flow_desc) %>%
   
-  mutate(across(c(production, prod_kt, export, net_wgt_exp, import, net_wgt_imp), ~ as.numeric(replace_na(., 0)))) %>% 
+  mutate(across(c(production, prod_kt, export, net_wgt_exp, import, net_wgt_imp),
+                ~ as.numeric(replace_na(., 0)))) %>%
   mutate(
     export_kt = round(net_wgt_exp / 1e6, 3),
     import_kt = round(net_wgt_imp / 1e6, 3)
   ) %>%
   select(-net_wgt_exp, -net_wgt_imp) %>%
   
-  # B. Continuous Forecasting Horizon
+  # B. Continuous Forecasting Horizon Extension (2022-2031)
   complete(year = 2022:2031, fill = list(reporter_iso = "IDN", cmd_code = "250510")) %>%
   mutate(type = if_else(year <= 2025, "Historical", "Forecast")) %>%
   arrange(year) %>%
   
-  # C. Clean Supply Framework with 2024 Mining Sector Proxy
+  # Inject IMF Macro Forecasts
+  left_join(imf_growth_factors, by = "year") %>%
+  
+  # C. Supply Framework (Clean 8% Compounding from 2023 Anchor)
   mutate(
+    prod_2023_anchor   = max(prod_kt[year == 2023], na.rm = TRUE),
+    export_2025_anchor = max(export_kt[year == 2025], na.rm = TRUE),
+    import_2025_anchor = max(import_kt[year == 2025], na.rm = TRUE)
+  ) %>%
+  arrange(year) %>%
+  mutate(
+    prod_growth_factor = if_else(year <= 2023, 1, 1 + cfg$mining_organic_growth),
     prod_kt = case_when(
-      year == 2023 ~ prod_kt,
-      year == 2024 ~ prod_kt[year == 2023] * (1 + cfg$proxy_growth_2024),
-      year == 2025 ~ prod_kt[year == 2023] * (1 + cfg$mining_organic_growth),
-      year > 2025  ~ prod_kt[year == 2023] * (1 + cfg$mining_organic_growth)^(year - 2025),
-      TRUE         ~ prod_kt
+      year <= 2023 ~ prod_kt,
+      TRUE         ~ prod_2023_anchor * cumprod(prod_growth_factor)
     ),
-    import_kt = case_when(year > 2025 ~ 17.2, TRUE ~ import_kt),
-    export_kt = case_when(year > 2025 ~ 3660.0, TRUE ~ export_kt),
+    export_growth_factor = if_else(year <= 2025, 1, (1 + export_macro_multiplier)),
+    export_kt = case_when(
+      year > 2025  ~ export_2025_anchor * cumprod(export_growth_factor),
+      TRUE         ~ export_kt
+    ),
+    import_growth_factor = if_else(year <= 2025, 1, (1 + import_macro_multiplier)),
+    import_kt = case_when(
+      year > 2025  ~ import_2025_anchor * cumprod(import_growth_factor),
+      TRUE         ~ import_kt
+    ),
     apparent_domestic_supply_kt = prod_kt + import_kt - export_kt
   ) %>%
+  select(-prod_2023_anchor, -export_2025_anchor, -import_2025_anchor,
+         -prod_growth_factor, -export_growth_factor, -import_growth_factor) %>%
   
-  # D. Demand Mapping
-  left_join(cement_kemenperin_base, by = "year") %>% 
+  # D. Cement Demand Mapping (Constant post-2024 capacity ceiling)
+  left_join(cement_kemenperin_base, by = "year") %>%
   mutate(
-    cement_mt = case_when(!is.na(cement_prod_mt) ~ cement_prod_mt, TRUE ~ cfg$cement_forecast_cap),
+    cement_mt        = case_when(!is.na(cement_prod_mt) ~ cement_prod_mt, TRUE ~ cfg$cement_forecast_cap),
     demand_cement_kt = cement_mt * cfg$cement_silica_ratio * 1000
-  ) %>% 
-  select(-cement_prod_mt) %>% 
-  
-  mutate(
-    demand_other_kt = if_else(
-      year <= 2026, 
-      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(year - 2022),
-      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(2026 - 2022) * (1 + cfg$mining_organic_growth)^(year - 2026)
-    )
   ) %>%
+  select(-cement_prod_mt) %>%
   
-  # E. Glass Mapping (2023 stability fix)
-  left_join(glass_projects %>% 
-              mutate(cum_additions = cumsum(capacity_add_kt)) %>% 
-              select(year_commissioned, cum_additions), 
-            by = join_by(year == year_commissioned)) %>% 
-  fill(cum_additions, .direction = "down") %>% 
-  mutate(cum_additions = replace_na(cum_additions, 0)) %>% 
+  # E. Other Industries Matrix (Assumed constant across horizon)
+  mutate(demand_other_kt = cfg$esdm_other_demand_2022 * cfg$other_demand_capacity_util) %>%
+  
+  # F. Glass Mapping (2023 stability fix & structural project steps)
+  left_join(glass_projects %>%
+              mutate(cum_additions = cumsum(capacity_add_kt)) %>%
+              select(year_commissioned, cum_additions),
+            by = join_by(year == year_commissioned)) %>%
+  fill(cum_additions, .direction = "down") %>%
+  mutate(cum_additions = replace_na(cum_additions, 0)) %>%
   mutate(
-    base_capacity = if_else(year <= 2026, cfg$esdm_glass_base_capacity, cfg$esdm_glass_base_capacity * (1.02)^(year - 2026)),
-    total_capacity = base_capacity + cum_additions,
-    util_rate = case_when(year <= 2023 ~ 1.00, year == 2024 ~ 0.75, year == 2025 ~ 0.79, TRUE ~ 0.85),
+    base_capacity   = if_else(year <= 2026, cfg$esdm_glass_base_capacity,
+                              cfg$esdm_glass_base_capacity * (1.02) ^ (year - 2026)),
+    total_capacity  = base_capacity + cum_additions,
+    util_rate       = case_when(
+      year <= 2023 ~ 1.00,
+      year == 2024 ~ 0.75,
+      year == 2025 ~ 0.79,
+      TRUE         ~ 0.85
+    ),
     demand_glass_kt = total_capacity * util_rate * cfg$glass_intensity_factor
-  ) %>% 
+  ) %>%
   select(-cum_additions, -base_capacity, -total_capacity, -util_rate) %>%
   
-  # F. Final Outputs
-  mutate(
-    total_industrial_demand_kt = demand_cement_kt + demand_glass_kt + demand_other_kt,
-    structural_balance_kt = apparent_domestic_supply_kt - total_industrial_demand_kt,
-    market_status = case_when(
-      structural_balance_kt > 250  ~ "Market Glut",
-      structural_balance_kt < -250 ~ "Supply Deficit",
-      TRUE                         ~ "Balanced"
-    )
-  ) %>% 
+  # G. Final Outputs & Dual Balance Evaluation
+  # ----------------------------------------------------------------------------
+# Two balance measures are computed in parallel:
+#
+# (1) domestic_balance_kt — the ORIGINAL formula, retained as-is.
+#     Measures domestically-available supply vs domestic industrial demand.
+#     Relevant for domestic market adequacy / import dependency analysis.
+#     Will correctly show tightness when exports divert supply away from
+#     domestic industry.
+#       = (prod + imp - exp) - domestic_industrial_demand
+
+# ----------------------------------------------------------------------------
+mutate(
+  total_industrial_demand_kt = demand_cement_kt + demand_glass_kt + demand_other_kt,
+  
+  # (1) Domestic balance (original formula, unchanged)
+  domestic_balance_kt    = apparent_domestic_supply_kt - total_industrial_demand_kt,
+  domestic_market_status = case_when(
+    domestic_balance_kt > 250  ~ "Market Glut",
+    domestic_balance_kt < -250 ~ "Supply Deficit",
+    TRUE                       ~ "Balanced"
+  )
+) %>%
   filter(year >= 2022)
+
 # Reserve and Mine location expansion
+reserve_data_final <- reserve_data_final %>%
+  mutate(
+    var = recode(var,
+                 "jumlah lokasi"                = "number_of_locations",
+                 "hipotetik (ton)"              = "hypothetical_resources_ton",
+                 "sumber daya: tereka (ton)"    = "inferred_resources_ton",
+                 "sumber daya: tertunjuk (ton)" = "indicated_resources_ton",
+                 "sumber daya: terukur (ton)"   = "measured_resources_ton",
+                 "cadangan: terkira (ton)"      = "probable_reserves_ton",
+                 "cadangan: terbukti (ton)"     = "proven_reserves_ton"
+    ),
+    provinsi = recode(provinsi,
+                      "Jawa Barat"                = "West Java",
+                      "Jawa Tengah"               = "Central Java",
+                      "Jawa Timur"                = "East Java",
+                      "Kalimantan Selatan"        = "South Kalimantan",
+                      "Kalimantan Tengah"         = "Central Kalimantan",
+                      "Kalimantan Barat"          = "West Kalimantan",
+                      "Kalimantan Timur"          = "East Kalimantan",
+                      "Kalimantan Utara"          = "North Kalimantan",
+                      "Kepulauan Bangka Belitung" = "Bangka Belitung Islands",
+                      "Kepulauan Riau"            = "Riau Islands",
+                      "Nusa Tenggara Barat"       = "West Nusa Tenggara",
+                      "Nusa Tenggara Timur"       = "East Nusa Tenggara",
+                      "Papua Barat"               = "West Papua",
+                      "Sulawesi Selatan"          = "South Sulawesi",
+                      "Sulawesi Tengah"           = "Central Sulawesi",
+                      "Sulawesi Tenggara"         = "Southeast Sulawesi",
+                      "Sumatera Barat"            = "West Sumatra",
+                      "Sumatera Selatan"          = "South Sumatra",
+                      "Sumatera Utara"            = "North Sumatra"
+                      # Aceh, Banten, Lampung, Riau, TOTAL unchanged
+    )
+  )
 
+# total reserve and mine location
+p5 <- reserve_data_final %>%
+  filter(provinsi %in% c("TOTAL"), var %in% c("number_of_locations", "proven_reserves_ton")) %>%
+  pivot_longer(cols = 3:7, names_to = "year", values_to = "values") %>%
+  arrange(year, var) %>%
+  mutate(
+    values = if_else(var == "proven_reserves_ton", values / 1e6, values),
+    var = factor(var, 
+                 levels = c("proven_reserves_ton", "number_of_locations"),
+                 labels = c("Proven Reserves (Million Tons)", "Number of Locations"))
+  ) %>%
+  ggplot(aes(x = year, y = values, fill = var)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ var, scales = "free_y", ncol = 2) +
+  labs(x = "Year", y = NULL, fill = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+  
 # Trade position and direction (value and volume)
-
+# Monthly exports 2022 to 2025-01 volumne and price (fix 202404 and 202501 this is tricky becuase fobvalue = 0.25 and net wgt 0.462)
 # Export prices
+  p6 <- inter_trade_data_month %>% 
+    filter(cmd_code == "250510", period >= "202502") %>% 
+    mutate(net_wgt = case_when(period == "202403" & flow_code == "X" ~ net_wgt * 1000))
+  group_by(flow_desc) %>% 
+    mutate(
+      unit_price = primary_value / (net_wgt/1000)) %>% 
+    filter(flow_code == "X") %>% 
+    ungroup() %>% 
+    ggplot(aes(x = period, y = unit_price, group = cmd_desc)) +
+    geom_line()
 
 # supply and demand
 
