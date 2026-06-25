@@ -270,8 +270,6 @@ p4 <- market_balance %>%
 
 # ==============================================================================
 # SILICA SAND MARKET BALANCE FORECAST
-# Change from original: Section G only — dual balance measure implementation.
-# Supply pipeline (Sections A–F) is unchanged from original.
 # ==============================================================================
 
 # ==============================================================================
@@ -432,6 +430,74 @@ mutate(
 ) %>%
   filter(year >= 2022)
 
+#  Block A
+prep_trade_data <- function(trade_df, target_cmd = "250510", target_iso = "IDN") {
+  # Isolate and transform export data
+  exports <- trade_df %>%
+    filter(cmd_code == target_cmd, flow_desc == "Export", reporter_iso == target_iso) %>%
+    select(ref_year, cmd_code, reporter_iso, export = primary_value, net_wgt_exp = net_wgt)
+  
+  # Isolate and transform import data
+  imports <- trade_df %>%
+    filter(cmd_code == target_cmd, flow_desc == "Import", reporter_iso == target_iso) %>%
+    select(ref_year, cmd_code, reporter_iso, import = primary_value, net_wgt_imp = net_wgt)
+  
+  # Consolidate and convert units to Kilotons (kt)
+  exports %>%
+    full_join(imports, by = join_by(ref_year, cmd_code, reporter_iso)) %>%
+    rename(year = ref_year) %>%
+    mutate(across(c(export, net_wgt_exp, import, net_wgt_imp), ~ as.numeric(tidyr::replace_na(., 0)))) %>%
+    mutate(
+      export_kt = round(net_wgt_exp / 1e6, 3),
+      import_kt = round(net_wgt_imp / 1e6, 3)
+    ) %>%
+    select(-net_wgt_exp, -net_wgt_imp)
+}
+
+# Block B
+calculate_supply_framework <- function(prod_df, trade_clean_df, imf_growth, cfg, start_yr = 2022, end_yr = 2031) {
+  prod_df %>%
+    filter(year >= start_yr) %>%
+    mutate(reporter_iso = "IDN", cmd_code = "250510") %>%
+    
+    # Merge Cleaned Trade Data
+    full_join(trade_clean_df, by = join_by(year, cmd_code, reporter_iso)) %>%
+    mutate(across(c(production, prod_kt, export_kt, import_kt), ~ as.numeric(tidyr::replace_na(., 0)))) %>%
+    
+    # Extend Horizon & Inject IMF Macros
+    tidyr::complete(year = start_yr:end_yr, fill = list(reporter_iso = "IDN", cmd_code = "250510")) %>%
+    mutate(type = if_else(year <= 2025, "Historical", "Forecast")) %>%
+    arrange(year) %>%
+    left_join(imf_growth, by = "year") %>%
+    
+    # Setup Anchors and Compound Future Projections
+    mutate(
+      prod_2023_anchor   = max(prod_kt[year == 2023], na.rm = TRUE),
+      export_2025_anchor = max(export_kt[year == 2025], na.rm = TRUE),
+      import_2025_anchor = max(import_kt[year == 2025], na.rm = TRUE)
+    ) %>%
+    arrange(year) %>%
+    mutate(
+      prod_growth_factor = if_else(year <= 2023, 1, 1 + cfg$mining_organic_growth),
+      prod_kt = case_when(
+        year <= 2023 ~ prod_kt,
+        TRUE         ~ prod_2023_anchor * cumprod(prod_growth_factor)
+      ),
+      export_growth_factor = if_else(year <= 2025, 1, (1 + export_macro_multiplier)),
+      export_kt = case_when(
+        year > 2025  ~ export_2025_anchor * cumprod(export_growth_factor),
+        TRUE         ~ export_kt
+      ),
+      import_growth_factor = if_else(year <= 2025, 1, (1 + import_macro_multiplier)),
+      import_kt = case_when(
+        year > 2025  ~ import_2025_anchor * cumprod(import_growth_factor),
+        TRUE         ~ import_kt
+      ),
+      apparent_domestic_supply_kt = prod_kt + import_kt - export_kt
+    ) %>%
+    select(-contains("anchor"), -contains("growth_factor"))
+}
+
 # Reserve and Mine location expansion
 reserve_data_final <- reserve_data_final %>%
   mutate(
@@ -485,6 +551,9 @@ p5 <- reserve_data_final %>%
   labs(x = "Year", y = NULL, fill = NULL) +
   theme_minimal() +
   theme(legend.position = "none")
+
+# reserve location by province
+
   
 # Trade position and direction (value and volume)
 # Monthly exports 2022 to 2025-01 volumne and price (fix 202404 and 202501 this is tricky becuase fobvalue = 0.25 and net wgt 0.462)
