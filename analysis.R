@@ -4,282 +4,29 @@ library(openxlsx)
 # Read IMF data
 imf_weo <-read_csv("~/Indonesia-Silica-Market/data/IMF.csv")
 
-# Market Balance (forcasted)
-market_balance <- silica_prod_bps %>% 
-  mutate(reporter_iso = "IDN",
-         cmd_code = "250510") %>% 
-  
-  # 1. Change to full_join so the missing 2025 year is safely injected
-  full_join(inter_trade_data %>%
-              select(ref_year, reporter_iso, reporter_desc, flow_desc, cmd_code, cmd_desc, primary_value, net_wgt) %>% 
-              filter(cmd_code == "250510", flow_desc == "Export", reporter_iso == "IDN"), 
-            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
-  rename("export" = primary_value,
-         "net_wgt_exp" = net_wgt) %>% 
-  select(-flow_desc) %>% 
-  
-  # 2. Left join works perfectly now because the 2025 row was built above
-  left_join(inter_trade_data %>%
-              select(ref_year, reporter_iso, reporter_desc, flow_desc, cmd_code, cmd_desc, primary_value, net_wgt) %>% 
-              filter(cmd_code == "250510", flow_desc == "Import", reporter_iso == "IDN"), 
-            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
-  
-  # 3. Clean up the joined metadata descriptions safely using coalesce
-  mutate(reporter_desc = coalesce(reporter_desc.y, reporter_desc.x),
-         cmd_desc = coalesce(cmd_desc.y, cmd_desc.x)) %>%
-  select(-reporter_desc.x, -cmd_desc.x, -reporter_desc.y, -cmd_desc.y, -flow_desc) %>% 
-  
-  rename("import" = primary_value,
-         "net_wgt_imp" = net_wgt) %>% 
-  select(type, year, cmd_desc, cmd_code, reporter_iso, production, prod_kt, export, net_wgt_exp, import, net_wgt_imp) %>% 
-  
-  # 4. Final cleaning and scaling
-  mutate(across(c(production, prod_kt, export, net_wgt_exp, import, net_wgt_imp), ~ as.numeric(replace_na(., 0)))) %>% 
-  mutate(net_wgt_exp = round(net_wgt_exp/1e6, 3),
-         net_wgt_imp = round(net_wgt_imp/1e6, 3)) %>% 
-  
-  # 5. adjust 2024 prod_kt by using 
-  arrange(year) %>%
-  # 1. Calculate the year-over-year growth rate of actual export weights
-  mutate(
-    export_growth = (net_wgt_exp - lag(net_wgt_exp)) / lag(net_wgt_exp)
-  ) %>%
-  # 2. Reconstruct 2024 and 2025 production using the 2023 baseline as the anchor
-  mutate(
-    production = case_when(
-      year == 2024 ~ lag(production, 1) * (1 + export_growth),
-      year == 2025 ~ lag(production, 2) * (1 + lag(export_growth, 1)) * (1 + export_growth),
-      TRUE ~ production
-    ),
-    # 3. Recalculate your volume-to-weight metric using your constant ratio
-    prod_kt = case_when(
-      year %in% c(2024, 2025) ~ round(production * 1.6 / 1000, 3),
-      TRUE ~ prod_kt
-    )
-  ) %>%
-  # Remove the temporary growth column
-  select(-export_growth) %>% 
-  
-  mutate(
-    # Ensure all trade variables are strictly weights in kilotons
-    import_kt = net_wgt_imp, 
-    export_kt = net_wgt_exp,
-    
-    # Calculate demand side
-    apparent_domestic_consumption = prod_kt + import_kt - export_kt,
-    total_demand = apparent_domestic_consumption + export_kt,
-    
-    # Export share of total supply
-    export_share_pct = (export_kt / prod_kt) * 100
-  )
-
-# apparent domestic consumption vs production 
-p1 <- market_balance %>% 
-  pivot_longer(cols = production:export_share_pct,
-               names_to = "var",
-               values_to = "values") %>% 
-  filter(var %in% c("prod_kt", "apparent_domestic_consumption")) %>% 
-  ggplot(aes(year, values, fill = var)) +
-  geom_bar(stat = "identity", position = "dodge")
-
-# silica sand trade balance
-p2 <- market_balance %>% 
-  mutate(trade_balance = net_wgt_exp - net_wgt_imp) %>% 
-  pivot_longer(cols = production:trade_balance,
-               names_to = "var",
-               values_to = "values") %>% 
-  filter(var == "trade_balance") %>% 
-  ggplot(aes(year, values, fill = var)) +
-  geom_bar(stat = "identity")
-  
-
-
-# export price
-p3 <- market_balance %>% 
-  mutate(
-    export_price = if_else(export_kt > 0, round(export / (export_kt * 1000), 2), 0),
-    import_price = if_else(import_kt > 0, round(import / (import_kt * 1000), 2), 0)
-  ) %>% 
-  pivot_longer(cols = production:import_price,
-               names_to = "var",
-               values_to = "values") %>% 
-  filter(var %in% c("export_price"), year >= 2021) %>% 
-  ggplot(aes(year, values, colour = var)) +
-  geom_col()
+imf_weo_forecast <- imf_weo %>% 
+  filter(INDICATOR %in% c("Gross domestic product (GDP), Constant prices, Domestic currency",
+                          "Gross domestic product (GDP), Current prices, Domestic currency",
+                          "Gross domestic product (GDP), Current prices, Per capita, US dollar",
+                          "Gross domestic product (GDP), Constant prices, Percent change",
+                          "Exports of goods and services, Volume, Free on board (FOB), Percent change",
+                          "Imports of goods and services, Volume, Cost insurance freight (CIF), Percent change",
+                          "Imports of goods, Volume, Cost insurance freight (CIF), Percent change",
+                          "Exports of goods, Volume, Free on board (FOB), Percent change")) %>% 
+  mutate(INDICATOR = case_when(
+    INDICATOR == "Gross domestic product (GDP), Constant prices, Domestic currency" ~ "gdp_const_domestic",
+    INDICATOR == "Gross domestic product (GDP), Current prices, Domestic currency" ~ "gdp_curr_domestic",
+    INDICATOR == "Gross domestic product (GDP), Current prices, Per capita, US dollar" ~ "gdp_per_capita_usd",
+    INDICATOR == "Gross domestic product (GDP), Constant prices, Percent change" ~ "gdp_growth_pct",
+    INDICATOR == "Exports of goods and services, Volume, Free on board (FOB), Percent change" ~ "export_goods_serv_growth_pct",
+    INDICATOR == "Imports of goods and services, Volume, Cost insurance freight (CIF), Percent change" ~ "import_goods_serv_growth_pct",
+    INDICATOR == "Imports of goods, Volume, Cost insurance freight (CIF), Percent change" ~ "import_goods_growth_pct",
+    INDICATOR == "Exports of goods, Volume, Free on board (FOB), Percent change" ~ "export_goods_growth_pct"
+  ))
 
 # ==============================================================================
 # 1. PARAMETERS & FORECAST CONFIGURATION
 # ==============================================================================
-cfg <- list(
-  # Macro & Growth Parameters
-  bps_growth_b4_2025       = 0.0479,     # 4.79% Growth from BPS Category B.4
-  mining_organic_growth    = 0.025,      # 2.5% steady-state growth post-2025
-  other_growth_pre_2026    = 0.015,      # Conservative 1.5% growth for other industries
-  export_attrition_rate    = 0.15,      # 13.3% structural decay post-2025
-  cement_forecast_cap      = 67.8,       # Post-2024 operational capacity ceiling (MT)
-  
-  # Downstream Industry Intensity Ratios (Audited to Ministry Data)
-  cement_silica_ratio      = 0.0254172,  # Single factor: Row 2 Sand / 2022 Cement Prod
-  glass_intensity_factor    = 0.372449,  # Row 1 Sand Demand / Total Glass Capacity
-  
-  # Audited Table 13.1 Baselines (Kilotons)
-  esdm_other_demand_2022   = 1523.93,    # Sum of Rows 3, 4, 6, and 7
-  esdm_glass_base_capacity = 2158.0      # Sum of Glass Industry Capacities
-)
-
-# Downstream glass industrial expansions registry
-glass_projects <- tibble(
-  year_commissioned = c(2024, 2026, 2028),
-  capacity_add_kt   = c(838.0, 720.0, 400.0)
-)
-
-# Kemenperin Official Cement Production
-cement_kemenperin_base <- tibble(
-  year           = c(2022, 2023, 2024),
-  cement_prod_mt = c(64.5, 66.9, 67.8)
-)
-
-# ==============================================================================
-# 2. PRE-PIPELINE STATIC SCALAR ANCHOR EXTRACTION
-# ==============================================================================
-prod_2024_anchor   <- max(silica_prod_bps$prod_kt[silica_prod_bps$year == 2024], na.rm = TRUE)
-prod_2025_imputed  <- prod_2024_anchor * (1 + cfg$bps_growth_b4_2025)
-
-export_2025_anchor <- 3660.0   
-import_2025_anchor <- 17.2     
-
-# ==============================================================================
-# 3. MAIN FORECASTING PIPELINE (FILTERED TO 2022 ONWARDS)
-# ==============================================================================
-market_balance <- silica_prod_bps %>% 
-  filter(year >= 2022) %>% 
-  mutate(reporter_iso = "IDN", cmd_code = "250510") %>% 
-  
-  # A. Ingestion and trade balance standardization
-  full_join(inter_trade_data %>%
-              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
-              filter(cmd_code == "250510", flow_desc == "Export", reporter_iso == "IDN"), 
-            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
-  rename("export" = primary_value, "net_wgt_exp" = net_wgt) %>% 
-  select(-flow_desc) %>% 
-  
-  left_join(inter_trade_data %>%
-              select(ref_year, reporter_iso, flow_desc, cmd_code, primary_value, net_wgt) %>% 
-              filter(cmd_code == "250510", flow_desc == "Import", reporter_iso == "IDN"), 
-            by = join_by(year == ref_year, cmd_code, reporter_iso)) %>% 
-  rename("import" = primary_value, "net_wgt_imp" = net_wgt) %>% 
-  select(-flow_desc) %>% 
-  
-  mutate(across(c(production, prod_kt, export, net_wgt_exp, import, net_wgt_imp), ~ as.numeric(replace_na(., 0)))) %>% 
-  mutate(
-    export_kt = round(net_wgt_exp / 1e6, 3),
-    import_kt = round(net_wgt_imp / 1e6, 3)
-  ) %>%
-  select(-net_wgt_exp, -net_wgt_imp) %>%
-  
-  # B. Continuous Forecasting Horizon Extension (Locked to 2022-2031)
-  complete(year = 2022:2031, fill = list(reporter_iso = "IDN", cmd_code = "250510")) %>%
-  mutate(type = if_else(year <= 2025, "Historical", "Forecast")) %>%
-  arrange(year) %>%
-  
-  # C. Clean Supply Framework 
-  mutate(
-    prod_kt = case_when(
-      year <= 2024 ~ prod_kt,
-      year == 2025 ~ prod_2025_imputed,
-      year > 2025  ~ prod_2025_imputed * (1 + cfg$mining_organic_growth)^(year - 2025)
-    ),
-    import_kt = case_when(
-      year > 2025  ~ import_2025_anchor,
-      TRUE         ~ import_kt
-    ),
-    export_kt = case_when(
-      year > 2025  ~ export_2025_anchor * (1 - cfg$export_attrition_rate)^(year - 2025),
-      TRUE         ~ export_kt
-    ),
-    apparent_domestic_supply_kt = prod_kt + import_kt - export_kt
-  ) %>%
-  
-  # D. Relational Cement Demand Mapping
-  left_join(cement_kemenperin_base, by = "year") %>% 
-  mutate(
-    cement_mt = case_when(
-      !is.na(cement_prod_mt) ~ cement_prod_mt, 
-      TRUE                   ~ cfg$cement_forecast_cap 
-    ),
-    demand_cement_kt = cement_mt * cfg$cement_silica_ratio * 1000
-  ) %>% 
-  select(-cement_prod_mt) %>% 
-  
-  # E. Other Industries Matrix
-  mutate(
-    demand_other_kt = if_else(
-      year <= 2026, 
-      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(year - 2022),
-      cfg$esdm_other_demand_2022 * (1 + cfg$other_growth_pre_2026)^(2026 - 2022) * (1 + cfg$mining_organic_growth)^(year - 2026)
-    )
-  ) %>%
-  
-  # F. Relational Glass Capacity Mapping (Fixed 2023 logic defect)
-  left_join(glass_projects %>% 
-              mutate(cum_additions = cumsum(capacity_add_kt)) %>% 
-              select(year_commissioned, cum_additions), 
-            by = join_by(year == year_commissioned)) %>% 
-  fill(cum_additions, .direction = "down") %>% 
-  mutate(cum_additions = replace_na(cum_additions, 0)) %>% 
-  
-  mutate(
-    base_capacity = if_else(year <= 2026, cfg$esdm_glass_base_capacity, cfg$esdm_glass_base_capacity * (1.02)^(year - 2026)),
-    total_capacity = base_capacity + cum_additions,
-    util_rate = case_when(
-      year <= 2023 ~ 1.00,  
-      year == 2024 ~ 0.75,  
-      year == 2025 ~ 0.79, 
-      year == 2026 ~ 0.82, 
-      TRUE         ~ 0.85
-    ),
-    demand_glass_kt = total_capacity * util_rate * cfg$glass_intensity_factor
-  ) %>% 
-  select(-cum_additions, -base_capacity, -total_capacity, -util_rate) %>%
-  
-  # G. Structural Balance and Market Status Outputs
-  mutate(
-    total_industrial_demand_kt = demand_cement_kt + demand_glass_kt + demand_other_kt,
-    structural_balance_kt = apparent_domestic_supply_kt - total_industrial_demand_kt,
-    market_status = case_when(
-      structural_balance_kt > 250  ~ "Market Glut / Inventory Build",
-      structural_balance_kt < -250 ~ "Supply Deficit (Alert)",
-      TRUE                         ~ "Balanced / Tight Market"
-    ),
-    export_share_pct = (export_kt / prod_kt) * 100
-  ) %>%
-  
-  # H. Final Safeguard Filter
-  filter(year >= 2022)
-
-
-p4 <- market_balance %>% 
-  relocate(year, type, reporter_iso, cmd_code, market_status) %>% 
-  pivot_longer(cols = production:export_share_pct,
-               names_to = "var",
-               values_to = "values") %>% 
-  filter(var %in% c("structural_balance_kt")) %>% 
-  ggplot(aes(year, values, fill = var)) +
-  geom_bar(stat = "identity")
-
-
-# ==============================================================================
-# 1. PARAMETERS & FORECAST CONFIGURATION
-# ==============================================================================
-cfg <- list(
-  mining_organic_growth    = 0.100,
-  cement_forecast_cap      = 67.8,
-  cement_silica_ratio      = 0.0254172,
-  glass_intensity_factor   = 0.372449,
-  esdm_other_demand_2022   = 1523.93,
-  esdm_glass_base_capacity = 2158.0,
-  other_demand_capacity_util = 0.60
-)
 
 glass_projects <- tibble(
   year_commissioned = c(2024, 2026, 2028),
@@ -328,9 +75,9 @@ prep_trade_data <- function(trade_df, target_cmd = "250510", target_iso = "IDN")
     select(-net_wgt_exp, -net_wgt_imp)
 }
 
-# Block B & c
 calculate_supply_framework <- function(prod_df, trade_clean_df, imf_growth, cfg, start_yr = 2011, end_yr = 2031, scenario = TRUE) {
-df <-  prod_df %>%
+  
+  df <- prod_df %>%
     filter(year >= start_yr) %>%
     mutate(reporter_iso = "IDN", cmd_code = "250510") %>%
     
@@ -343,50 +90,50 @@ df <-  prod_df %>%
     mutate(type = if_else(year <= 2025, "Historical", "Forecast")) %>%
     arrange(year) %>%
     left_join(imf_growth, by = "year")
-
-if (scenario == TRUE) {
   
-  df2 <- df %>% 
-    # Setup Anchors and Compound Future Projections
-    mutate(
-      prod_2024_anchor   = max(prod_kt[year == 2024], na.rm = TRUE),
-      export_2025_anchor = max(export_kt[year == 2025], na.rm = TRUE),
-      import_2025_anchor = max(import_kt[year == 2025], na.rm = TRUE)
-    ) %>%
-    arrange(year) %>%
-    mutate(
-      prod_growth_factor = if_else(year <= 2024, 1, 1 + cfg$mining_organic_growth),
-      prod_kt = case_when(
-        year <= 2024 ~ prod_kt,
-        TRUE         ~ prod_2024_anchor * cumprod(prod_growth_factor)
-      ))
-
-} else if (scenario == FALSE) {
+  if (scenario == TRUE) {
+    df2 <- df %>% 
+      # Setup Anchors and Compound Future Projections
+      mutate(
+        prod_2024_anchor   = max(prod_kt[year == 2024], na.rm = TRUE),
+        export_2026_anchor = 352.92 * (12 / 4),                        # NEW: Annualized Jan-Apr 2026 data (~1,058.76 kt)
+        import_2025_anchor = max(import_kt[year == 2025], na.rm = TRUE)
+      ) %>%
+      arrange(year) %>%
+      mutate(
+        prod_growth_factor = if_else(year <= 2024, 1, 1 + cfg$mining_organic_growth),
+        prod_kt = case_when(
+          year <= 2024 ~ prod_kt,
+          TRUE         ~ prod_2024_anchor * cumprod(prod_growth_factor)
+        ))
+    
+  } else if (scenario == FALSE) {
+    df2 <- df %>% 
+      mutate(
+        prod_kt = prod_kt * 1.2,
+        prod_2023_anchor   = max(prod_kt[year == 2023], na.rm = TRUE),
+        export_2026_anchor = 352.92 * (12 / 4),                        # NEW: Annualized Jan-Apr 2026 data (~1,058.76 kt)
+        import_2025_anchor = max(import_kt[year == 2025], na.rm = TRUE)
+      ) %>%
+      arrange(year) %>%
+      mutate(
+        prod_growth_factor = if_else(year <= 2023, 1, 1 + cfg$mining_organic_growth),
+        prod_kt = case_when(
+          year <= 2023 ~ prod_kt,
+          TRUE         ~ prod_2023_anchor * cumprod(prod_growth_factor)
+        ))
+  }
   
-  # Setup Anchors and Compound Future Projections
-  df2 <- df %>% 
+  df3 <- df2 %>%      
     mutate(
-    prod_2023_anchor   = max(prod_kt[year == 2023], na.rm = TRUE),
-    export_2025_anchor = max(export_kt[year == 2025], na.rm = TRUE),
-    import_2025_anchor = max(import_kt[year == 2025], na.rm = TRUE)
-  ) %>%
-    arrange(year) %>%
-    mutate(
-      prod_growth_factor = if_else(year <= 2023, 1, 1 + cfg$mining_organic_growth),
-      prod_kt = case_when(
-        year <= 2023 ~ prod_kt,
-        TRUE         ~ prod_2023_anchor * cumprod(prod_growth_factor)
-      ))
-  
-}
-
-df3 <- df2 %>%     
-    mutate(
-      export_growth_factor = if_else(year <= 2025, 1, (1 + export_macro_multiplier)),
+      # NEW: Export growth factor stays flat (1) through 2026, then applies IMF growth from 2027+
+      export_growth_factor = if_else(year <= 2026, 1, (1 + export_macro_multiplier)),
       export_kt = case_when(
-        year > 2025  ~ export_2025_anchor * cumprod(export_growth_factor),
-        TRUE         ~ export_kt
+        year >= 2026  ~ export_2026_anchor * cumprod(export_growth_factor), # Evaluates to exactly 1,058.76 in 2026
+        TRUE          ~ export_kt
       ),
+      
+      # UNCHANGED: Imports continue to use the 2025 anchor scaled by IMF factors
       import_growth_factor = if_else(year <= 2025, 1, (1 + import_macro_multiplier)),
       import_kt = case_when(
         year > 2025  ~ import_2025_anchor * cumprod(import_growth_factor),
@@ -395,6 +142,8 @@ df3 <- df2 %>%
       apparent_domestic_supply_kt = prod_kt + import_kt - export_kt
     ) %>%
     select(-contains("anchor"), -contains("growth_factor"))
+  
+  return(df3) # Explicitly return the dataframe to the pipeline
 }
 
 # Block D,E,F
@@ -490,10 +239,10 @@ market_balance_1 <- run_market_balance_pipeline(
   
 # Scenario 2: adjust BPS data by 2023 value with mining growth around 10% per annum
 cfg <- list(
-  mining_organic_growth    = 0.100,
+  mining_organic_growth    = 0.025,
   cement_forecast_cap      = 67.8,
   cement_silica_ratio      = 0.0254172,
-  glass_intensity_factor   = 0.372449,
+  glass_intensity_factor   = 0.70,
   esdm_other_demand_2022   = 1523.93,
   esdm_glass_base_capacity = 2158.0,
   other_demand_capacity_util = 0.70
@@ -526,6 +275,30 @@ market_bal_2 <- market_balance_2 %>%
                values_to = "values") %>% 
   ggplot(aes(x = year, y = values, fill = var)) +
   geom_bar(stat = "identity")
+
+# silica sand trade balance
+p2 <- market_balance %>% 
+  mutate(trade_balance = export_kt - import_kt) %>% 
+  pivot_longer(cols = production:domestic_market_status,
+               names_to = "var",
+               values_to = "values") %>% 
+  filter(var == "trade_balance") %>% 
+  ggplot(aes(year, values, fill = var)) +
+  geom_bar(stat = "identity")
+
+# export price
+p3 <- market_balance %>% 
+  mutate(
+    export_price = if_else(export_kt > 0, round(export / (export_kt * 1000), 2), 0),
+    import_price = if_else(import_kt > 0, round(import / (import_kt * 1000), 2), 0)
+  ) %>% 
+  pivot_longer(cols = production:import_price,
+               names_to = "var",
+               values_to = "values") %>% 
+  filter(var %in% c("export_price"), year >= 2021) %>% 
+  ggplot(aes(year, values, colour = var)) +
+  geom_col()
+
 
 # Reserve and Mine location expansion
 reserve_data_final <- reserve_data_final %>%
@@ -581,24 +354,29 @@ p5 <- reserve_data_final %>%
   theme_minimal() +
   theme(legend.position = "none")
 
-# reserve location by province
-
+# reserve location by province (table)
+p7 <- reserve_data_final %>% 
+  filter()
   
 # Trade position and direction (value and volume)
 # Monthly exports 2022 to 2025-01 volumne and price (fix 202404 and 202501 this is tricky becuase fobvalue = 0.25 and net wgt 0.462)
 # Export prices
-  p6 <- inter_trade_data_month %>% 
-    filter(cmd_code == "250510", period >= "202502") %>% 
-    mutate(net_wgt = case_when(period == "202403" & flow_code == "X" ~ net_wgt * 1000))
+p6 <- inter_trade_data_month %>% 
+  filter(cmd_code == "250510", period >= "202502") %>% 
+  mutate(net_wgt = if_else(period == "202403" & flow_code == "X", net_wgt * 1000, net_wgt)) %>% 
   group_by(flow_desc) %>% 
-    mutate(
-      unit_price = primary_value / (net_wgt/1000)) %>% 
-    filter(flow_code == "X") %>% 
-    ungroup() %>% 
-    ggplot(aes(x = period, y = unit_price, group = cmd_desc)) +
-    geom_line()
+  mutate(
+    unit_price = primary_value / (net_wgt/1000)) %>% 
+  filter(flow_code == "X") %>% 
+  ungroup() %>% 
+  ggplot(aes(x = period, y = unit_price, group = cmd_desc)) +
+  geom_line()
 
-# supply and demand
+# Export weight and prices by port
+
+
+
+
 
 # Supply
 ## mine output production

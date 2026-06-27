@@ -2,6 +2,7 @@
 
 library(comtradr)
 library(tidyverse)
+library(openxlsx)
 
 # set comtrade api key
 set_primary_comtrade_key()
@@ -285,8 +286,6 @@ inter_trade_data <- pull_trade(
 ) %>% 
   bind_rows() 
 
-country_code <- country_codes %>% filter(is.na(exit_year))
-
 inter_trade_data_month <- pull_trade(
   reporter = c("IDN"),
   partner = "World",
@@ -298,8 +297,51 @@ inter_trade_data_month <- pull_trade(
 ) %>% 
   bind_rows() 
 
-# Alternative data BACII dataset
+# trade by port
+# trade value
+trade_port <- read.xlsx(xlsxFile = "~/Indonesia-Silica-Market/data/trade_by_port.xlsx", sheet = 1)
+trade_port_wgt <- read.xlsx(xlsxFile = "~/Indonesia-Silica-Market/data/trade_by_port.xlsx", sheet = 2)
 
+clean_bps_trade <- function(df) {
+  
+  clean_data <- df[2:nrow(df), ]
+  
+  colnames(clean_data) <- tolower(colnames(clean_data))
+  
+  clean_data <- clean_data %>% 
+    rename("year" = x1,
+           "month" = x2,
+           "country_destination" = x3) %>%
+    fill(year, .direction = "down") %>% 
+    fill(month, .direction = "down") %>% 
+    select(-pelabuhan) %>% 
+    mutate(month_num = str_extract_all(month, "[0-9]{2}"),
+           year = as.character(year),
+           period = ym(paste0(year,"-",month_num))) %>% 
+    relocate(year, period) %>% 
+    select(-month, -month_num) %>% 
+    mutate(across(.cols = belitung:totals, ~ as.numeric(.)),
+           across(.cols = belitung:totals, ~ replace_na(., 0))) %>% 
+    pivot_longer(cols = belitung:totals,
+                 names_to = "var",
+                 values_to = "value")
 
+}
+
+clean_trade_port_wgt <- clean_bps_trade(trade_port_wgt) %>% 
+  rename("weight" = value) %>% 
+  mutate(weight = weight/1000)
+
+clean_trade_port_val <- clean_bps_trade(trade_port_val)
+
+combine_trade <- clean_trade_port_wgt %>%
+  left_join(clean_trade_port_val, by = join_by(year, period, country_destination, var)) %>% 
+  mutate(unit_value = value/weight) %>% 
+  filter(!var %in% c("totals", "soekarno-hatta.(u)")) %>% 
+  mutate(weight = case_when(period == "2024-03-01" & var == "ketapang.k..barat" ~ weight * 1000,
+                            period == "2025-09-01" & var == "tanjung.perak" ~ weight * 1000, 
+                            .default = weight),
+         unit_value = value/weight,
+         unit_value = replace_na(unit_value, 0))
 
 
