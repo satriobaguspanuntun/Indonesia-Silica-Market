@@ -299,7 +299,7 @@ inter_trade_data_month <- pull_trade(
 
 # trade by port
 # trade value
-trade_port <- read.xlsx(xlsxFile = "~/Indonesia-Silica-Market/data/trade_by_port.xlsx", sheet = 1)
+trade_port_val <- read.xlsx(xlsxFile = "~/Indonesia-Silica-Market/data/trade_by_port.xlsx", sheet = 1)
 trade_port_wgt <- read.xlsx(xlsxFile = "~/Indonesia-Silica-Market/data/trade_by_port.xlsx", sheet = 2)
 
 clean_bps_trade <- function(df) {

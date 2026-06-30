@@ -1,5 +1,9 @@
 library(tidyverse)
 library(openxlsx)
+library(bbplot)
+library(patchwork)
+library(gt)
+library(gtExtras)
 
 # Read IMF data
 imf_weo <-read_csv("~/Indonesia-Silica-Market/data/IMF.csv")
@@ -345,41 +349,186 @@ p5 <- reserve_data_final %>%
     values = if_else(var == "proven_reserves_ton", values / 1e6, values),
     var = factor(var, 
                  levels = c("proven_reserves_ton", "number_of_locations"),
-                 labels = c("Proven Reserves (Million Tons)", "Number of Locations"))
+                 labels = c("Proven Reserves (Million Tons)", "Number of Mine Locations"))
   ) %>%
   ggplot(aes(x = year, y = values, fill = var)) +
   geom_bar(stat = "identity") +
   facet_wrap(~ var, scales = "free_y", ncol = 2) +
-  labs(x = "Year", y = NULL, fill = NULL) +
+  scale_fill_manual(values = c("#FAAB18", "#1380A1")) +
+  labs(x = "Year", y = NULL, fill = NULL,
+       caption = "Source: ESDM Yearbook 2020-2025") +
   theme_minimal() +
-  theme(legend.position = "none")
+  theme(legend.position = "none") 
 
 # reserve location by province (table)
-p7 <- reserve_data_final %>% 
-  filter()
+p6 <- reserve_data_final %>% 
+  filter(var %in% c("proven_reserves_ton", "number_of_locations") & provinsi != "TOTAL") %>% 
+  pivot_longer(cols = starts_with("20"), names_to = "year", values_to = "value") %>% 
+  ggplot(aes(x = year, y = value, fill = provinsi, group = provinsi)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~ var, scales = "free_y", ncol = 2) +
+  bbc_style()
+  
+
+# First, reshape your wide year columns into long format
+long_data <- reserve_data_final %>%
+  pivot_longer(cols = starts_with("20"), names_to = "year", values_to = "value") %>%
+  mutate(year = as.numeric(year)) %>%
+  filter(var %in% c("number_of_locations", "proven_reserves_ton"))
+
+# Plot using a 2-Row Facet Grid
+ggplot(long_data, aes(x = year, y = value, color = provinsi, group = provinsi)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_grid(rows = vars(var), cols = vars(provinsi), scales = "free_y") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Mining Locations vs. Proven Reserves Over Time",
+       x = "Year", y = "Value (Reserves in Tons / Count of Locations)")
+
   
 # Trade position and direction (value and volume)
 # Monthly exports 2022 to 2025-01 volumne and price (fix 202404 and 202501 this is tricky becuase fobvalue = 0.25 and net wgt 0.462)
-# Export prices
-p6 <- inter_trade_data_month %>% 
-  filter(cmd_code == "250510", period >= "202502") %>% 
-  mutate(net_wgt = if_else(period == "202403" & flow_code == "X", net_wgt * 1000, net_wgt)) %>% 
-  group_by(flow_desc) %>% 
-  mutate(
-    unit_price = primary_value / (net_wgt/1000)) %>% 
-  filter(flow_code == "X") %>% 
-  ungroup() %>% 
-  ggplot(aes(x = period, y = unit_price, group = cmd_desc)) +
-  geom_line()
 
-# Export weight and prices by port
+# Define the ports that actually have continuous data
+high_density_ports <- c("kendawangan", "kumai", "natuna.ranai", "singkep.-.dabo")
+
+p9 <- combine_trade %>% 
+  filter(var %in% high_density_ports, unit_value > 0) %>% 
+  mutate(var = case_when(
+    var == "kendawangan"   ~ "Kendawangan",
+    var == "kumai"         ~ "Kumai",
+    var == "natuna.ranai"  ~ "Ranai, Natuna",
+    var == "singkep.-.dabo" ~ "Dabo Singkep",
+    .default = var
+  )) %>% 
+  group_by(period, var) %>% 
+  summarise(unit_price_avg = weighted.mean(unit_value, weight, na.rm = TRUE), .groups = "drop") %>% 
+  ggplot(aes(x = period, y = unit_price_avg, color = var)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_brewer(palette = "Set1") + 
+  theme_minimal() +
+  labs(
+    title = "Silica Sand Export Price Across Primary Ports",
+    subtitle = "Monthly Export Unit Price 2022/01-2026/04",
+    y = "Average Unit Price ($/ton)",
+    x = NULL,
+    color = "Export Hub"
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
 
 
+summary_data <- combine_trade %>%
+  filter(unit_value > 0) %>%
+  mutate(year = lubridate::year(period)) %>%
+  filter(year < 2026) %>%
+  group_by(year) %>%
+  summarise(
+    avg_price = weighted.mean(unit_value, weight, na.rm = TRUE),
+    total_volume = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
 
+# Scale price to volume axis for overlay
+price_scale <- max(summary_data$total_volume) / max(summary_data$avg_price)
+
+p10 <- ggplot(summary_data, aes(x = factor(year))) +
+  geom_col(aes(y = total_volume), fill = "#006BA2", alpha = 0.7, width = 0.6) +
+  geom_line(aes(y = avg_price * price_scale, group = 1), 
+            color = "#DB444B", linewidth = 1.2) +
+  geom_point(aes(y = avg_price * price_scale), 
+             color = "#DB444B", size = 3) +
+  scale_y_continuous(
+    name = "Total Export Volume (ton)",
+    labels = scales::comma,
+    sec.axis = sec_axis(
+      ~ . / price_scale,
+      name = "Weighted Avg Unit Price ($/ton)",
+      labels = scales::dollar
+    )
+  ) +
+  labs(
+    title = "Silica Sand Exports: Rising Volume, Falling Price",
+    subtitle = "Annual Silica Sand Export 2022-2025",
+    caption = "Source: Author Calculation, BPS",
+    x = NULL
+  ) +
+  theme_minimal()
+
+p9_p10 <- p9 + p10
+
+
+p11 <- combine_trade %>%
+  mutate(var = case_when(
+    var == "kendawangan"   ~ "Kendawangan",
+    var == "kumai"         ~ "Kumai",
+    var == "natuna.ranai"  ~ "Ranai, Natuna",
+    var == "singkep.-.dabo" ~ "Dabo Singkep",
+    .default = var
+  )) %>% 
+  filter(unit_value > 0) %>%
+  mutate(year = lubridate::year(period)) %>%
+  filter(year < 2026) %>% 
+  group_by(year, country_destination) %>%
+  summarise(
+    avg_price = weighted.mean(unit_value, weight, na.rm = TRUE),
+    total_volume = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  group_by(year) %>% 
+  mutate(total = sum(total_volume, na.rm = TRUE),
+         share = total_volume/total * 100) %>% 
+  select(-total) %>% 
+  filter(country_destination != "JAPAN") %>% 
+  gt() %>%
+  cols_label(
+    year               = "Year",
+    country_destination = "Destination",
+    avg_price          = "Avg Price ($/ton)",
+    total_volume       = "Volume (ton)",
+    share              = "Share of Total Export (%)"
+  ) %>%
+  fmt_number(columns = avg_price, decimals = 2) %>%
+  fmt_number(columns = total_volume, decimals = 0, use_seps = TRUE) %>%
+  fmt_number(columns = share, decimals = 2, use_seps = TRUE) %>% 
+  gt_color_rows(
+    columns = avg_price,
+    palette = c("#f8f9fa", "#2b4c7e"),  # Soft off-white to Slate Blue
+    domain  = c(14, 25)
+  ) %>%
+  gt_color_rows(
+    columns = total_volume,
+    palette = c("#f8f9fa", "#3b6e4c"),  # Soft off-white to Sage Green
+    domain  = c(20, 3600000)
+  ) %>% 
+  gt_color_rows(
+    columns = share,
+    palette = c("#f8f9fa", "#c05621"),  # Soft off-white to Warm Amber
+    domain = c(0, 100)
+  ) %>% 
+  cols_align(align = "center",
+             columns = c(avg_price, total_volume, share)) %>% 
+  tab_header(
+    title    = "Silica Sand Export Price and Volume by Destination",
+    subtitle = "Aggregated annual data, 2022–2025"
+  ) %>%
+  tab_footnote(footnote = "Source: Author Calculation, BPS") %>% 
+  tab_options(
+    table.font.size       = 13,
+    heading.align         = "left",
+    column_labels.font.weight = "bold"
+  )
 
 
 # Supply
 ## mine output production
+p12 <- 
+
+
 ## Quality of the silica sand
 ## Supply crunch may happened if supply of high quality sand are not accompanied 
 ## with mine upgrading this add an extra cost to produce
